@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>hatrace Presentation</title>
+    <meta charset="utf-8">
+    <style>
+      @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+      @import url(https://fonts.googleapis.com/css?family=Droid+Serif:400,700,400italic);
+      @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,700,400italic);
+
+      body { font-family: 'Droid Serif'; }
+      /*body { font-family: 'Ubuntu'; }*/
+      h1, h2, h3 {
+        font-family: 'Yanone Kaffeesatz';
+        font-weight: normal;
+      }
+      .remark-code, .remark-inline-code { font-family: 'Ubuntu Mono'; }
+
+      .frontpage img {
+        height: 3em;
+      }
+    </style>
+  </head>
+  <body>
+    <textarea id="source">
+
+class: center, middle, frontpage
+
+# hatrace
+
+### A syscall tracing library in Haskell
+
+##### _Niklas Hambüchen_
+
+.center[![Right-aligned image](./nh2-bw-192.png)]
+
+##### `mail@nh2.me`
+##### `niklas@fpcomplete.com`
+
+---
+
+# Agenda
+
+1. Background knowledge
+  * System calls: How programs do I/O
+  * `strace` examples
+1. The need for scriptable syscall tracing
+1. `hatrace` tour
+1. How it's implemented
+1. What needs doing
+1. A bit of syscall philosophy
+
+---
+
+# System calls
+
+(Almost) any time your program wants to do I/O on Linux, this happens via _system calls_.
+
+These are "function calls" that happen across the userspace-kernel boundary.
+
+They have a C API, but because they cross this boundary, they are not simply C function calls.
+Instead, they use architecture-dependent calling conventions, explicitly using certain hardware features (such as named registers).
+
+C standard libraries expose C-based wrappers around this.
+
+There are hundreds system calls; some examples:
+
+```c
+man 2 read    ssize_t read(int fd, void *buf, size_t count);
+man 2 write   ssize_t write(int fd, const void *buf, size_t count);
+```
+
+---
+
+## System calls example in assembly
+
+
+```asm
+; Example from https://jameshfisher.com/2018/03/10/linux-assembly-hello-world/
+global _start
+section .text
+
+_start:
+  mov rax, 1        ; write(
+  mov rdi, 1        ;   STDOUT_FILENO,
+  mov rsi, msg      ;   "Hello, world!\n",
+  mov rdx, msglen   ;   sizeof("Hello, world!\n")
+  syscall           ; );
+
+  mov rax, 60       ; exit(
+  mov rdi, 0        ;   EXIT_SUCCESS
+  syscall           ; );
+
+section .rodata
+  msg: db "Hello, world!", 10
+  msglen: equ $ - msg
+```
+
+```bash
+$ nasm -f elf64 -o hello.o hello.s
+$ ld -o hello hello.o
+$ ./hello
+Hello, world!
+```
+
+---
+
+## strace demo
+
+```bash
+$ strace -f example-programs-build/hello-linux-x86_64
+```
+
+```c
+execve("example-programs-build/hello-linux-x86_64", ["example-programs-build/hello-lin"...], [/* 84 vars */]) = 0
+write(1, "Hello, world!\n", 14Hello, world!
+)         = 14
+exit(0)                                 = ?
++++ exited with 0 +++
+```
+
+Notice interleaved output (stderr of the program, and stderr of `strace`).
+
+You can clean it up with e.g.
+
+```bash
+strace -f example-programs-build/hello-linux-x86_64 > /dev/null
+```
+
+---
+
+## System calls bring transparency
+
+System calls are a **well-defined boundary**.
+All programs need to use them, **even closed-source** ones.
+
+**You can figure out most of what a program does by just inspecting the syscalls.**
+
+Syscall-based investigations work on
+
+<center><em>any program in any programming language</em></center>
+
+This is why I use `strace` every day.
+
+It immediately reveils:
+
+* bugs in what the program should do
+* performance problems, like
+  * reading the same file over and over again
+  * unecessary network roundtrips
+
+---
+
+# The need for scriptable syscall tracing
+
+`strace` is great for inspecting a program's syscalls.
+
+You can run it, do some manual filtering e.g. using **`grep`**, and then draw your conclusions.
+
+But you cannot automate it well.
+
+Often you need:
+
+* a reproducible yes/no answer on whether something happens
+* do interaction with the traced program at specific points
+* an API to do the above
+
+---
+
+# `hatrace`
+
+Code: https://github.com/nh2/hatrace
+
+### `hatrace` executable
+
+* intended to do most of what `strace` does, with lots of extra features
+* coloured output *
+* JSON output *
+* less portability than `strace` because Haskell runs on fewer architectures
+
+### `hatrace` Haskell library
+
+* full control over everything
+* makes writing custom tools and repros easy
+
+(* in the making)
+
+---
+
+# `hatrace` - Use cases
+
+### **General**
+
+  * Get all syscalls in a list and process them programatically.
+  * Audit high-assurance software systems.
+  * Debug difficult bugs that occur only in certain rare situations.
+  * Change the results of system calls as seen by the traced program.
+
+### **Bug reproducers**
+
+  * Demonstrate how a program fails when a given syscall returns certain data.
+  * Kill your build tool at the 3rd `write()` syscall to an `.o` file, checking whether it will recover from that in the next run.
+
+---
+
+### **Testing**
+
+  * Write test suites that assert how your code uses system calls, for correctness or performance.
+  * Mock syscalls to test how your program would behave in situations that are difficult to create in the real world.
+  * Implement anomaly test suites [like `sqlite` does](https://www.sqlite.org/testing.html#i_o_error_testing), exhaustively testing whether your program can recover from a crash in _any_ syscall.
+
+### **Fuzzing**
+
+  * Insert garbage data into the program by changing syscall results or directly changing its memory contents.
+  * Speed up your fuzzing by having full insight into the fuzzed program's behaviour.
+
+### **Adding features to existing programs**
+
+  * Add "magic" support for new file systems without modifying existing programs (like [this paper](https://www.usenix.org/legacy/events/expcs07/papers/22-spillane.pdf) shows).
+  * Add logging capabilities to programs that were designed without.
+
+---
+
+class: middle, center
+
+# DEMO
+
+## test suite tour
+
+Shows many example use cases and how they are written.
+
+---
+
+### Example: Getting all syscalls in a list
+
+```haskell
+it "allows obtaining all syscalls as a list for hello.asm" $ do
+
+  -- Resolve full path to executable
+  argv <- procToArgv "example-programs-build/hello-linux-x86_64" []
+
+  (exitCode, events) <- sourceTraceForkExecvFullPathWithSink argv CL.consume
+
+  let syscalls =
+        [ sc | (_pid, SyscallStop (SyscallEnter (sc, _args))) <- events ]
+
+  exitCode `shouldBe` ExitSuccess
+  syscalls `shouldBe`
+    [ KnownSyscall Syscall_execve
+    , KnownSyscall Syscall_write
+    , KnownSyscall Syscall_exit
+    ]
+```
+
+`hatrace` offers a streaming interface (via the `conduit` library), so that you can interact with the program while receiving syscall events.
+
+In this call, we don't interact and just turn the stream into a list with `CL.consume`.
+
+---
+
+# Built on `ptrace()`
+
+`ptrace()` is what `strace` and `gdb` are implemented on top of.
+
+It stops the traced program every time some IO happens.
+
+Let's you do things when the program is stopped.
+
+Stop types:
+
+* `PTRACE_EVENT` stops
+* Syscall-stops
+* Signal-delivery-stop
+* Death
+
+You can read and write memory and registers.
+
+That way you can inspect and modify system calls and their results.
+
+When you're done, you tell the tracee to continue running until the next stop.
+
+---
+
+class: middle, center
+
+# DEMO
+
+## implementation tour
+
+---
+
+class: middle, center
+
+# DEMO
+
+## custom tools
+
+Custom tools are easy to add and usually require only a few lines of Haskell.
+
+---
+
+## Custom tools examples
+
+### `execve()` tree
+
+Shows programs and their children _live_ as they are created, in a tree format.
+
+Also collects them into a final tree in the end.
+
+```
+./hatrace-exec-tree -- bash -c 'true && /usr/bin/time bash -c "true && /bin/echo hi"'
+```
+
+### Finding non-atomic writes
+
+Find all `write()`s to files that weren't followed by a `rename()`.
+
+```
+stack exec -- hatrace \
+  --find-nonatomic-writes example-programs-build/atomic-write non-atomic 10 tempfile
+```
+
+```
+The following files were written nonatomically by the program:
+ - "/home/niklas/src/haskell/hatrace/tempfile"
+```
+
+---
+
+# What needs doing
+
+I've only started working on `hatrace` very recently.
+
+It already found and reliably reproduced a hard-to-reproduce bug in the GHC Haskell Compiler.
+
+But it still needs help from you:
+
+* Adding more syscall details
+* reading tracee memory more efficiently
+* hatrace executable features
+  * JSON output
+  * coloured output
+  * special run modes tailored to specific tasks (e.g. `execve` tree)
+* Equivalent to `strace -y` (tracking origin of file descriptors, printing paths)
+* Equivalent to `strace -c` (keeping counts, summary statistics)
+* OSX support? WSL support? ([#1](https://github.com/nh2/hatrace/issues/1))
+* More on https://github.com/nh2/hatrace#todo-list-for-contributors
+
+---
+
+# A bit of syscall philosophy
+
+> "95% of computer problems can be solved with strace, the remaining 4% with GDB" -- _me_
+
+### Syscall-oriented programming
+
+> Trying to make your program emit do exactly the right syscalls is one path to sanity.
+
+### The Syscalls-and-Haskell Duality
+
+```
+Haskell              Linux
+------------------------------------------
+pure functions       userspace computation
+explicit IO          system calls
+```
+
+
+    </textarea>
+    <script src="https://remarkjs.com/downloads/remark-latest.min.js">
+    </script>
+    <script>
+      var slideshow = remark.create();
+    </script>
+  </body>
+</html>
